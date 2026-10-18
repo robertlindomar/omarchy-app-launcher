@@ -6,6 +6,8 @@ import qs.Commons
 import qs.Ui
 import "Usage.js" as Usage
 import "Agents.js" as Agents
+import "lib/Calc.js" as Calc
+import "lib/Units.js" as Units
 
 // A centered launcher: a manual "Favorites" section on top, then every installed
 // application and coding agent below, alphabetical and scrollable.
@@ -57,11 +59,179 @@ Item {
     target: DesktopEntries.applications
     function onValuesChanged() { localAppLibrary.appsChanged() }
   }
-  readonly property string pluginId: (root.manifest && root.manifest.id) || "tyrsolution.app-launcher"
-  readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/omarchy/app-launcher"
+  readonly property string pluginId: (root.manifest && root.manifest.id) || "robertlindomar.launcher-plus"
+  readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/omarchy/launcher-plus"
 
+  property bool helpOpened: false
+  property int helpPage: 0
+  readonly property var helpPages: [
+    {title:"Navegar e organizar", rows:[
+      {key:"↑ ↓ ← →", description:"Navegue pela grade ou pela lista. O painel lateral mostra os detalhes da seleção."},
+      {key:"Enter", description:"Abra o aplicativo ou arquivo, conecte por SSH ou copie o resultado de uma conta."},
+      {key:"Shift + Enter", description:"Em arquivos: abre a pasta. Em SSH: copia o comando sem conectar."},
+      {key:"Ctrl + F", description:"Adicione ou remova aplicativos, agentes e hosts SSH dos favoritos. Na lista, ★ indica um favorito."},
+      {key:"Tab / Shift + Tab", description:"Avance ou volte entre as categorias."},
+      {key:"Home / End", description:"Vá ao primeiro ou ao último item."},
+      {key:"Esc", description:"Limpe a busca, volte à categoria Todos e depois feche. Em diálogos, cancela."},
+      {key:"Ctrl + H", description:"Abra ou feche esta ajuda. Use ← → ou Tab para trocar as páginas."}
+    ]},
+    {title:"Buscas e exemplos", rows:[
+      {key:"Digite um nome", description:"Encontre aplicativos, configurações, janelas e arquivos em uma busca."},
+      {key:"f contrato", description:"Busque somente arquivos e pastas. Use f ~/Downloads/ para listar uma pasta."},
+      {key:"w:", description:"Liste janelas abertas. Use w: nome para filtrar e Enter para ir até a janela."},
+      {key:"cb: texto", description:"Busque no histórico de cópia. Enter copia novamente o item escolhido."},
+      {key:"ssh: / ssh: nome", description:"Liste ou filtre seus servidores SSH."},
+      {key:"12*7+3", description:"Faça contas offline. Também aceita 20% de 250. Enter copia o resultado."},
+      {key:"5 km para m", description:"Converta unidades offline, incluindo comprimento, temperatura e tamanho de dados."},
+      {key:"gh / yt / web", description:"Exemplos: gh quickshell, yt linux, web receita. A busca só abre no navegador após Enter."}
+    ]},
+    {title:"SSH e remoção com confirmação", rows:[
+      {key:"Ctrl + O", description:"Oculte o host SSH selecionado sem perder a posição na lista."},
+      {key:"ssh:ocultos", description:"Veja os hosts ocultos. Ctrl + O restaura o selecionado. O known_hosts não é alterado."},
+      {key:"Favorito SSH", description:"Continua disponível na grade mesmo oculto. Conectar por ele faz o host reaparecer na busca."},
+      {key:"Ctrl + Delete", description:"Peça a remoção do aplicativo ou agente selecionado. Delete sozinho não desinstala."},
+      {key:"Confirmações", description:"Confira se será removido um atalho ou o programa. Itens sensíveis recebem um segundo aviso. A opção inicial é Cancelar."},
+      {key:"Tab / ← → / Enter", description:"Na confirmação: escolha a opção e pressione Enter. Esc cancela. Nenhuma exclusão ocorre só ao abrir o diálogo."},
+      {key:"Botão direito", description:"Veja favoritos, opções de SSH, ações do aplicativo e remoção. A tecla Menu também abre essas opções."}
+    ]}
+  ]
+  function toggleHelp() {
+    contextMenu.hide()
+    root.helpOpened = !root.helpOpened
+    if (root.helpOpened) { root.helpPage = 0; helpScroll.contentY = 0 }
+    keyCatcher.forceActiveFocus()
+  }
+  function changeHelpPage(direction) {
+    root.helpPage = Math.max(0, Math.min(root.helpPages.length - 1, root.helpPage + direction))
+    helpScroll.contentY = 0
+  }
+  property var removalTarget: null
+  property var removalPlan: ({})
+  property string removalStage: ""
+  readonly property string removalMessage: {
+    var name = root.removalTarget ? root.removalTarget.name : ""
+    if (root.removalStage === "loading") return "Consultando a remoção de " + name + "…\nNenhuma alteração está sendo feita."
+    if (root.removalStage === "error") return "Não foi possível remover " + name + ".\n\n" + (root.removalPlan.summary || "Falha ao consultar o aplicativo.")
+    if (root.removalStage === "risk") return "AVISO ADICIONAL — " + name + "\n\n" + (root.removalPlan.reasons || []).join("\n\n") + "\n\nDeseja prosseguir mesmo assim?"
+    return "Remover " + name + "?\n\n" + (root.removalPlan.summary || "")
+  }
+  function cancelRemoval() {
+    root.removalStage = ""
+    root.removalTarget = null
+    removalInspector.running = false
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+  function confirmRemoval() {
+    if (root.removalStage === "loading") return
+    if (root.removalStage === "error") { root.cancelRemoval(); return }
+    if (!root.removalTarget || root.removalPlan.canRemove !== true) return
+    if (root.removalStage === "first" && root.removalPlan.risky) {
+      root.removalStage = "risk"
+      removalDialog.selectedIndex = 0
+      return
+    }
+    if (root.removalStage !== "first" && root.removalStage !== "risk") return
+    var target = root.removalTarget
+    root.removalTarget = null
+    root.removalStage = ""
+    if (target.kind === "agent") Quickshell.execDetached(["omarchy-launch-tui", "--app-id=org.omarchy.remove-agent"].concat(root.helper(["uninstall-agent",target.binary])))
+    else root.removeDesktop(target.id, target.name)
+    root.dismiss()
+  }
   property bool opened: false
   property string filterText: ""
+  readonly property var previewRow: root.rowAt(root.selectedSection, root.selectedIndex)
+  function kindLabel(row) {
+    return row ? ({app:"Aplicativo", agent:"Agente de código", file:row.icon === "folder" ? "Pasta" : "Arquivo", window:"Janela aberta", ssh:"Conexão SSH", clipboard:"Histórico de cópia", answer:"Resultado", web:"Busca na web", setting:"Configuração"})[row.kind] || "Item" : "Detalhes"
+  }
+  function itemDescription(row) {
+    if (!row) return "Selecione um item para ver os detalhes."
+    if (row.description) return String(row.description)
+    if (row.kind === "file") return row.icon === "folder" ? "Abra esta pasta no gerenciador de arquivos." : "Abra este arquivo no aplicativo padrão."
+    if (row.kind === "ssh") return "Conecte ao servidor pelo terminal usando suas configurações SSH."
+    if (row.kind === "clipboard") return "Pressione Enter para copiar novamente este item do histórico."
+    if (row.kind === "window") return "Alterne para esta janela e sua área de trabalho."
+    if (row.kind === "web") return "O navegador abre somente quando você escolher este resultado."
+    return String(row.subtext || "")
+  }
+  function itemDetails(row) {
+    if (!row) return []
+    var details = [{label:"Tipo", value:root.kindLabel(row)}]
+    function add(label,value) { if (value) details.push({label:label,value:String(value)}) }
+    if (row.kind === "app") { add("Categoria",row.category); add("Nome genérico",row.subtext); add("ID do aplicativo",row.id) }
+    if (row.kind === "agent") add("Comando",(row.argv || []).join(" "))
+    if (row.kind === "file") { add("Caminho",row.path); add("Ação alternativa","Shift + Enter abre a pasta") }
+    if (row.kind === "window") { add("Janela",row.subtext); add("Identificador",row.address) }
+    if (row.kind === "ssh") { add("Comando",row.copyText); add("Origem",row.subtext.split(" · ")[1]); add("Ação alternativa","Shift + Enter copia o comando") }
+    if (row.kind === "answer") add("Expressão",root.filterText)
+    if (row.kind === "web") add("Endereço",row.url)
+    if (row.kind === "setting") add("Painel",row.name)
+    return details
+  }
+  function primaryLabel(row) {
+    if (!row) return "Selecione um item"
+    if (row.kind === "clipboard" || row.kind === "answer") return "Copiar resultado"
+    if (row.kind === "ssh") return "Conectar no terminal"
+    if (row.kind === "window") return "Ir para a janela"
+    return "Abrir " + root.kindLabel(row).toLowerCase()
+  }
+  property var searchRows: []
+  property string searchMessage: ""
+  readonly property bool listMode: root.searching
+  readonly property bool externalOnly: /^(f|file|arquivo|w|window|janela|cb|clip|copiado|ssh)[: ]/i.test(root.filterText) || /^(~\/|\/|https?:\/\/|gh |yt |web )/i.test(root.filterText)
+  readonly property string pluginDirectory: Quickshell.env("HOME") + "/.config/omarchy/plugins/robertlindomar.launcher-plus"
+  function helper(args) { return ["python3", root.pluginDirectory + "/bin/launcher-search"].concat(args) }
+  function extraRows() {
+    if (!root.searching || root.category !== "Todos") return []
+    var out = [], q = root.filterText.trim()
+    var calc = q.length < 256 ? Calc.evaluate(q.replace(/(\d),(\d)/g, "$1.$2").replace(/% de /gi, "% of ")) : null
+    var unit = Units.convert(q.replace(/ para | em /gi, " to "))
+    if (calc || unit) {
+      var answer = unit || calc
+      out.push({id:"answer:"+q, kind:"answer", name:answer.text, subtext:unit ? unit.detail + " · Enter copia" : "Calculadora · Enter copia o resultado", copyText:answer.text, icon:"accessories-calculator", iconUrl:"", monogram:""})
+    }
+    var url = "", title = ""
+    if (/^https?:\/\//i.test(q)) { url=q; title="Abrir endereço" }
+    else if (/^gh /i.test(q)) { url="https://github.com/search?q="+encodeURIComponent(q.slice(3)); title="Pesquisar no GitHub" }
+    else if (/^yt /i.test(q)) { url="https://www.youtube.com/results?search_query="+encodeURIComponent(q.slice(3)); title="Pesquisar no YouTube" }
+    else if (!/^(f|file|arquivo|w|window|janela|cb|clip|copiado|ssh)[: ]/i.test(q) && !/^(~\/|\/)/.test(q)) {
+      url="https://www.google.com/search?q="+encodeURIComponent(q.replace(/^web /i,"")); title="Pesquisar na web"
+    }
+    if (url) out.push({id:"web:"+q,kind:"web",name:title,subtext:q+" · só abre ao pressionar Enter",url:url,icon:"internet-web-browser",iconUrl:"",monogram:""})
+    return out
+  }
+  function startSearch() {
+    root.searchRows = []
+    root.searchMessage = ""
+    searchDebounce.restart()
+  }
+  function acceptSearch(query, text) {
+    if (!root.opened || query !== root.filterText) return
+    try {
+      var result=JSON.parse(text)
+      var rows=result.rows || []
+      root.searchRows = root.showingHiddenSsh
+        ? rows.filter(function(row) { return row.kind === "ssh" && root.hiddenSsh[row.id] === true })
+        : rows.filter(function(row) { return row.kind !== "ssh" || root.hiddenSsh[row.id] !== true })
+      root.searchMessage = root.showingHiddenSsh && root.searchRows.length === 0 ? "Nenhum host SSH oculto" : result.message || ""
+    } catch(e) { root.searchMessage="Não foi possível ler a busca" }
+    root.rebuild()
+  }
+  function launchExtra(row, secondary) {
+    if (row.kind === "file") Quickshell.execDetached(["xdg-open", secondary ? String(row.subtext) : row.path])
+    else if (row.kind === "window") Quickshell.execDetached(root.helper(["focus-window",row.address]))
+    else if (row.kind === "web") Quickshell.execDetached(["xdg-open", row.url])
+    else if (row.kind === "answer") Quickshell.execDetached(root.helper(["action","copy",row.copyText]))
+    else if (row.kind === "ssh") {
+      if (!secondary && root.hiddenSsh[row.id]) root.setSshHidden(row, false)
+      if (secondary) Quickshell.execDetached(root.helper(["action","copy",row.copyText]))
+      else Quickshell.execDetached(["omarchy-launch-tui", "--app-id=org.omarchy.ssh"].concat(row.sshArgs))
+    }
+    else if (row.kind === "clipboard") Quickshell.execDetached(root.helper(["action","clipboard",row.hash]))
+    else return false
+    root.dismiss()
+    return true
+  }
   property string category: "Todos"
   readonly property var categories: ["Todos", "Agentes", "Desenvolvimento", "Internet", "Escritório", "Mídia", "Jogos", "Sistema", "Utilitários", "Outros", "Configurações"]
   readonly property var settings: [
@@ -91,6 +261,8 @@ Item {
   }
   function setCategory(value) {
     root.category = value
+    if (root.searching) root.startSearch()
+    root.interacted = false
     contextMenu.hide()
     root.rebuild()
     root.resetSelection()
@@ -132,11 +304,15 @@ Item {
   // Persisted state. `usage` drives the frequent row, `seenIds` drives badges.
   property var usage: ({})
   property var favorites: ({})
+  property var sshFavorites: []
+  property var hiddenSsh: ({})
+  property bool adjustingRows: false
+  readonly property bool showingHiddenSsh: /^ssh:\s*ocultos\s*$/i.test(root.filterText)
   property var seenIds: ({})
   property bool seenLoaded: false
   property var newIds: ({})
 
-  // Tunable per summon: `omarchy-shell shell toggle tyrsolution.app-launcher '{"iconScale":1.4}'`
+  // Tunable per summon: `omarchy-shell shell toggle robertlindomar.launcher-plus '{"iconScale":1.4}'`
   property real iconScale: 1.0
   property string fontFamily: Style.font.menuFamily
 
@@ -171,8 +347,11 @@ Item {
     if (payload.fontFamily) root.fontFamily = payload.fontFamily
     if (Number(payload.iconScale) > 0) root.iconScale = Number(payload.iconScale)
 
+    root.helpOpened = payload.help === true
+    root.helpPage = 0
     root.category = "Todos"
     root.filterText = String(payload.query || "")
+    root.startSearch()
     contextMenu.hide()
     root.opened = true
 
@@ -192,6 +371,11 @@ Item {
   function close() {
     if (!root.opened) return
     root.opened = false
+    root.helpOpened = false
+    root.cancelRemoval()
+    searchDebounce.stop()
+    searchWorker.running = false
+    root.searchRows = []
     contextMenu.hide()
     // Everything on screen at close time counts as seen, so badges clear once
     // you've actually had a chance to look at them.
@@ -224,6 +408,7 @@ Item {
   }
 
   function rebuild() {
+    var previous = root.interacted ? root.selectedRow() : null
     if (!root.appLibrary) { root.allRows = []; root.favoritePool = []; return }
     // sortedEntries returns search rows ({ entry, score, key, name }), not the
     // DesktopEntry itself — the entry is one level down. With no query it is
@@ -242,6 +427,7 @@ Item {
         kind: "app",
         name: root.appLibrary.entryName(entry),
         subtext: root.appLibrary.entrySubtext(entry),
+        description: String(entry.comment || entry.genericName || ""),
         icon: String(entry.icon || ""),
         iconUrl: "",
         monogram: "",
@@ -267,8 +453,18 @@ Item {
       return a.searchRank - b.searchRank || String(a.name).localeCompare(String(b.name), "pt-BR")
     })
 
+    if (root.searching) {
+      if (root.externalOnly) out = []
+      var extras = root.extraRows()
+      var answers = extras.filter(function(r) { return r.kind === "answer" })
+      var web = extras.filter(function(r) { return r.kind === "web" })
+      out = answers.concat(out).concat(root.category === "Todos" ? root.searchRows : []).concat(web)
+    }
     root.allRows = out
     root.favoritePool = root.pickFavorites(out)
+    if (previous) {
+      for (var n=0;n<out.length;n++) if (out[n].id === previous.id) { root.select("all", n); break }
+    }
     root.clampSelection()
   }
 
@@ -351,11 +547,19 @@ Item {
     var scored = []
     for (var i = 0; i < rows.length; i++)
       if (root.favorites[rows[i].id] === true) scored.push(rows[i])
+    if (root.category === "Todos" && !root.searching) {
+      for (var j=0; j<root.sshFavorites.length; j++) {
+        var row = root.sshFavorites[j]
+        if (root.favorites[row.id] && !scored.some(function(item) { return item.id === row.id })) scored.push(row)
+      }
+    }
     return scored
   }
 
   function setFilter(next) {
     root.filterText = next
+    root.interacted = false
+    root.startSearch()
     root.rebuild()
     root.resetSelection()
     allGrid.positionViewAtBeginning()
@@ -395,7 +599,7 @@ Item {
   // column so the caret lands where the eye expects it.
   function moveSelection(dx, dy) {
     root.interacted = true
-    var columns = Math.max(1, panel.columns)
+    var columns = root.listMode ? 1 : Math.max(1, panel.columns)
     var rows = root.rowsFor(root.selectedSection)
     if (rows.length === 0) return
 
@@ -443,6 +647,7 @@ Item {
 
   function launch(row) {
     if (!row) return
+    if (root.launchExtra(row, false)) return
     if (row.kind === "setting") { Quickshell.execDetached(row.command); root.dismiss(); return }
     if (row.kind === "agent") { root.launchAgent(row); return }
     var id = String(row.id || "")
@@ -508,11 +713,15 @@ Item {
   }
 
   function removeEntry(row) {
-    if (!row) return
-    var id = String(row.id || "")
-    var name = String(row.name || "")
-    root.removeDesktop(id, name)
-    root.dismiss()
+    if (!row || ["app","agent"].indexOf(row.kind) < 0 || root.removalStage) return
+    contextMenu.hide()
+    root.removalTarget = {id:String(row.id), name:String(row.name), kind:row.kind, binary:row.argv && row.argv.length ? String(row.argv[0]) : ""}
+    root.removalPlan = ({})
+    root.removalStage = "loading"
+    removalDialog.selectedIndex = 0
+    removalInspector.command = root.helper(row.kind === "agent" ? ["inspect-agent",root.removalTarget.binary] : ["inspect-removal", row.id])
+    removalInspector.running = true
+    keyCatcher.forceActiveFocus()
   }
 
   function resetUsage(row) {
@@ -546,11 +755,16 @@ Item {
   }
 
   function toggleFavorite(row) {
-    if (!row || row.kind === "setting") return
+    if (!row || ["app", "agent", "ssh"].indexOf(row.kind) < 0) return
     var next = ({})
     for (var id in root.favorites) next[id] = true
     if (next[row.id]) delete next[row.id]
     else next[row.id] = true
+    if (row.kind === "ssh") {
+      root.sshFavorites = root.sshFavorites.filter(function(item) { return item.id !== row.id })
+      if (next[row.id]) root.sshFavorites = root.sshFavorites.concat([row])
+      sshFavoritesFile.setText(JSON.stringify(root.sshFavorites, null, 2))
+    }
     root.favorites = next
     favoritesFile.setText(Usage.serializeSeen(next))
     root.rebuild()
@@ -560,11 +774,74 @@ Item {
     }
   }
 
+  function setSshHidden(row, hidden) {
+    if (!row || row.kind !== "ssh") return
+    var scrollY = allGrid.contentY
+    var section = root.selectedSection
+    var index = root.selectedIndex
+    var query = root.filterText
+    root.interacted = true
+    root.adjustingRows = true
+    var next = Object.assign({}, root.hiddenSsh)
+    if (hidden) next[row.id] = true
+    else delete next[row.id]
+    root.hiddenSsh = next
+    hiddenSshFile.setText(JSON.stringify(next, null, 2))
+    // Update the current model in one frame, without emptying or rerunning it.
+    root.searchRows = root.searchRows.filter(function(item) {
+      return item.kind !== "ssh" || (root.showingHiddenSsh ? next[item.id] === true : next[item.id] !== true)
+    })
+    root.rebuild()
+    var rows = root.rowsFor(section)
+    root.select(section, Math.max(0, Math.min(index, rows.length - 1)))
+    Qt.callLater(function() {
+      if (root.opened && root.filterText === query) {
+        allGrid.forceLayout()
+        allGrid.contentY = Math.max(0, Math.min(scrollY, allGrid.contentHeight - allGrid.height))
+      }
+      root.adjustingRows = false
+    })
+  }
+
   function persistUsage() {
     usageFile.setText(Usage.serializeUsage(root.usage))
   }
 
   Component.onCompleted: Util.execDetached("mkdir -p " + Util.shellQuote(root.stateDir))
+
+  Timer {
+    id: searchDebounce
+    interval: 180
+    onTriggered: {
+      if (!root.opened || !root.searching || root.category !== "Todos") return
+      if (searchWorker.running) return
+      searchWorker.query = root.filterText
+      searchWorker.command = root.helper(["search", root.showingHiddenSsh ? "ssh:" : searchWorker.query])
+      searchWorker.running = true
+    }
+  }
+  Process {
+    id: removalInspector
+    stdout: StdioCollector {
+      onStreamFinished: {
+        if (root.removalStage !== "loading") return
+        try { root.removalPlan = JSON.parse(text) }
+        catch(e) { root.removalPlan = {summary:"Falha ao consultar a remoção. Tente novamente."} }
+        root.removalStage = root.removalPlan.canRemove === true ? "first" : "error"
+        removalDialog.selectedIndex = 0
+      }
+    }
+  }
+  Process {
+    id: searchWorker
+    property string query: ""
+    stdout: StdioCollector {
+      onStreamFinished: root.acceptSearch(searchWorker.query, text)
+    }
+    onExited: {
+      if (root.opened && root.filterText !== searchWorker.query) searchDebounce.restart()
+    }
+  }
 
   // Non-login shell on purpose: the shell's PATH already carries the mise
   // shims, and sourcing the profile would touch ~/.local/share, which the
@@ -626,6 +903,36 @@ Item {
   }
 
   FileView {
+    id: hiddenSshFile
+    path: root.stateDir + "/ssh-hidden.json"
+    atomicWrites: true
+    printErrors: false
+    onLoaded: {
+      try {
+        var data=JSON.parse(text())
+        root.hiddenSsh=data && typeof data === "object" && !Array.isArray(data) ? data : ({})
+      } catch(e) { root.hiddenSsh=({}) }
+      root.startSearch()
+    }
+    onLoadFailed: root.hiddenSsh=({})
+  }
+
+  FileView {
+    id: sshFavoritesFile
+    path: root.stateDir + "/ssh-favorites.json"
+    atomicWrites: true
+    printErrors: false
+    onLoaded: {
+      try {
+        var rows = JSON.parse(text())
+        root.sshFavorites = Array.isArray(rows) ? rows.filter(function(row) { return row && row.kind === "ssh" && Array.isArray(row.sshArgs) && row.sshArgs[0] === "ssh" }) : []
+      } catch(e) { root.sshFavorites = [] }
+      root.rebuild()
+    }
+    onLoadFailed: { root.sshFavorites = []; root.rebuild() }
+  }
+
+  FileView {
     id: usageFile
     path: root.stateDir + "/usage.json"
     atomicWrites: true
@@ -674,14 +981,16 @@ Item {
     visible: root.opened
     anchors { top: true; bottom: true; left: true; right: true }
     color: "transparent"
-    WlrLayershell.namespace: "omarchy-app-launcher"
+    WlrLayershell.namespace: "robert-launcher-plus"
     WlrLayershell.layer: WlrLayer.Overlay
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
     exclusionMode: ExclusionMode.Ignore
 
     // Whole columns only, so the grid sits centered without a ragged gutter.
     // The scroll bar lives in the margin beside it.
-    readonly property int maxGridWidth: Math.min(Style.space(880), panel.width - Style.gapsOut * 2 - root.contentMargin * 2 - root.scrollBarWidth - Style.spacing.md)
+    readonly property int previewWidth: panel.width >= Style.space(1000) ? Style.space(290) : 0
+    readonly property int previewSpace: previewWidth > 0 ? previewWidth + Style.spacing.lg * 2 : 0
+    readonly property int maxGridWidth: Math.min(Style.space(760), panel.width - Style.gapsOut * 2 - root.contentMargin * 2 - root.scrollBarWidth - Style.spacing.md - previewSpace)
     readonly property int columns: Math.max(1, Math.floor(maxGridWidth / root.cellWidth))
     readonly property int gridWidth: columns * root.cellWidth
 
@@ -697,9 +1006,9 @@ Item {
 
     BorderSurface {
       id: card
-      width: panel.gridWidth + root.contentMargin * 2 + root.scrollBarWidth + Style.spacing.md
+      width: panel.gridWidth + root.contentMargin * 2 + root.scrollBarWidth + Style.spacing.md + panel.previewSpace
       height: Math.min(Style.space(620), panel.height - Style.gapsOut * 2)
-      radius: root.cornerRadius
+      radius: Math.max(Style.space(16), root.cornerRadius)
       anchors.centerIn: parent
       color: root.background
       borderSpec: root.borderSpec
@@ -718,13 +1027,40 @@ Item {
 
         Keys.priority: Keys.BeforeItem
         Keys.onPressed: function(event) {
+          if (root.removalStage) {
+            if (!event.isAutoRepeat) removalDialog.handleKey(event)
+            event.accepted = true
+            return
+          }
+          if (root.helpOpened) {
+            if (event.key === Qt.Key_Escape || (event.key === Qt.Key_H && (event.modifiers & Qt.ControlModifier))) root.toggleHelp()
+            else if (event.key === Qt.Key_Right || event.key === Qt.Key_Tab) root.changeHelpPage(event.modifiers & Qt.ShiftModifier ? -1 : 1)
+            else if (event.key === Qt.Key_Left || event.key === Qt.Key_Backtab) root.changeHelpPage(-1)
+            else if (event.key === Qt.Key_Down || event.key === Qt.Key_Up) helpScroll.contentY = Math.max(0, Math.min(Math.max(0, helpScroll.contentHeight - helpScroll.height), helpScroll.contentY + (event.key === Qt.Key_Down ? 48 : -48)))
+            event.accepted = true
+            return
+          }
+          if (event.key === Qt.Key_H && (event.modifiers & Qt.ControlModifier)) {
+            root.toggleHelp()
+            event.accepted = true
+            return
+          }
           if (contextMenu.visible) {
             if (event.key === Qt.Key_Escape) { contextMenu.hide(); event.accepted = true }
             return
           }
 
-          if (event.key === Qt.Key_F && (event.modifiers & Qt.ControlModifier)) {
+          if (event.key === Qt.Key_Delete && event.modifiers === Qt.ControlModifier) {
+            root.removeEntry(root.selectedRow())
+            event.accepted = true
+          } else if (event.key === Qt.Key_Delete) {
+            event.accepted = true
+          } else if (event.key === Qt.Key_F && (event.modifiers & Qt.ControlModifier)) {
             root.toggleFavorite(root.selectedRow())
+            event.accepted = true
+          } else if (event.key === Qt.Key_O && (event.modifiers & Qt.ControlModifier)) {
+            var sshRow = root.selectedRow()
+            if (sshRow && sshRow.kind === "ssh") root.setSshHidden(sshRow, !root.hiddenSsh[sshRow.id])
             event.accepted = true
           } else if (event.key === Qt.Key_Escape) {
             if (root.filterText) root.setFilter("")
@@ -735,7 +1071,8 @@ Item {
             root.cycleCategory((event.modifiers & Qt.ShiftModifier) || event.key === Qt.Key_Backtab ? -1 : 1)
             event.accepted = true
           } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-            root.launchSelected()
+            var selected = root.selectedRow()
+            if (!(selected && (event.modifiers & Qt.ShiftModifier) && root.launchExtra(selected, true))) root.launchSelected()
             event.accepted = true
           } else if (event.key === Qt.Key_Right) {
             root.moveSelection(1, 0); event.accepted = true
@@ -780,7 +1117,7 @@ Item {
             id: query
             anchors { left: parent.left; verticalCenter: parent.verticalCenter }
             width: parent.width - counter.width - Style.spacing.lg
-            text: root.filterText || "Buscar aplicativos e configurações…"
+            text: root.filterText || "Buscar apps, arquivos, janelas ou calcular…"
             color: root.foreground
             opacity: root.filterText ? 1 : 0.5
             font.family: root.fontFamily
@@ -808,15 +1145,7 @@ Item {
           Text {
             id: counter
             anchors { right: parent.right; verticalCenter: parent.verticalCenter }
-            text: {
-              var agents = 0
-              for (var i = 0; i < root.allRows.length; i++)
-                if (root.allRows[i].kind === "agent") agents++
-              var apps = root.allRows.length - agents
-              var label = apps + (apps === 1 ? " aplicativo" : " aplicativos")
-              if (agents > 0) label += " · " + agents + (agents === 1 ? " agente" : " agentes")
-              return label
-            }
+            text: root.allRows.length + " resultados" + (searchWorker.running || searchDebounce.running ? " · buscando…" : "")
             color: root.foreground
             opacity: 0.45
             font.family: root.fontFamily
@@ -882,7 +1211,7 @@ Item {
         GridView {
           id: favoritesGrid
           visible: root.showFavorites
-          anchors { top: favoritesLabel.bottom; horizontalCenter: parent.horizontalCenter }
+          anchors { top: favoritesLabel.bottom; left: parent.left }
           width: panel.gridWidth
           height: visible ? root.cellHeight * Math.min(2, Math.ceil(root.favoriteRows.length / panel.columns)) : 0
           cellWidth: root.cellWidth
@@ -900,6 +1229,7 @@ Item {
           id: sectionRule
           visible: root.showFavorites
           anchors { top: favoritesGrid.bottom; left: parent.left; right: parent.right }
+          anchors.rightMargin: panel.previewSpace
           anchors.topMargin: visible ? Style.spacing.sm : 0
           height: visible ? Math.max(1, Style.space(1)) : 0
           color: root.foreground
@@ -928,6 +1258,7 @@ Item {
             bottom: footer.top
             left: parent.left
             right: parent.right
+            rightMargin: panel.previewSpace
             topMargin: Style.spacing.md
             bottomMargin: Style.spacing.xs
           }
@@ -941,14 +1272,14 @@ Item {
             anchors.horizontalCenter: parent.horizontalCenter
             y: 0
             width: panel.gridWidth
-            height: allArea.visibleRows * root.cellHeight
+            height: root.listMode ? allArea.height : allArea.visibleRows * root.cellHeight
             clip: true
-            cellWidth: root.cellWidth
-            cellHeight: root.cellHeight
+            cellWidth: root.listMode ? width : root.cellWidth
+            cellHeight: root.listMode ? Style.space(56) : root.cellHeight
             model: root.allRows
             boundsBehavior: Flickable.StopAtBounds
             cacheBuffer: root.cellHeight * 4
-            delegate: tileComponent
+            delegate: root.listMode ? searchResultComponent : tileComponent
 
             property string section: "all"
           }
@@ -1018,11 +1349,125 @@ Item {
         Text {
           anchors.centerIn: allArea
           visible: root.allRows.length === 0
-          text: root.filterText ? "Nenhum resultado para “" + root.filterText + "”" : "Nenhum aplicativo nesta categoria"
+          text: root.searchMessage || (searchWorker.running || searchDebounce.running ? "Buscando…" : root.filterText ? "Nenhum resultado para “" + root.filterText + "”" : "Nenhum aplicativo nesta categoria")
           color: root.foreground
           opacity: 0.5
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
+        }
+
+        Rectangle {
+          visible: panel.previewWidth > 0
+          anchors { top: headerRule.bottom; bottom: footer.top; right: detailsPanel.left; rightMargin: Style.spacing.lg }
+          width: 1
+          color: root.foreground
+          opacity: 0.1
+        }
+
+        Item {
+          id: detailsPanel
+          visible: panel.previewWidth > 0
+          anchors { top: headerRule.bottom; bottom: footer.top; right: parent.right; topMargin: Style.spacing.lg; bottomMargin: Style.spacing.sm }
+          width: panel.previewWidth
+
+          Flickable {
+            anchors { top: parent.top; left: parent.left; right: parent.right; bottom: detailsAction.top; bottomMargin: Style.spacing.lg }
+            contentHeight: detailsColumn.height
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            Column {
+              id: detailsColumn
+              width: detailsPanel.width
+              spacing: Style.spacing.lg
+
+              Item {
+                width: Style.space(68); height: width
+                anchors.horizontalCenter: parent.horizontalCenter
+                Image {
+                  id: detailsIcon
+                  anchors.fill: parent
+                  source: root.previewRow ? (root.previewRow.iconUrl || Quickshell.iconPath(root.previewRow.icon || "application-x-executable", true)) : ""
+                  sourceSize.width: width * 2; sourceSize.height: height * 2
+                  fillMode: Image.PreserveAspectFit
+                  asynchronous: true
+                }
+                Text {
+                  anchors.centerIn: parent
+                  visible: detailsIcon.status !== Image.Ready
+                  text: root.previewRow ? root.previewRow.monogram || "◇" : "◇"
+                  font.pixelSize: Style.space(32)
+                  color: root.accent
+                }
+              }
+              Text {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                text: root.previewRow ? root.previewRow.name : "Detalhes"
+                textFormat: Text.PlainText
+                color: root.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.space(25)
+                font.bold: true
+                wrapMode: Text.WrapAnywhere
+                maximumLineCount: 3
+                elide: Text.ElideRight
+              }
+              Text {
+                width: parent.width
+                horizontalAlignment: Text.AlignHCenter
+                text: root.itemDescription(root.previewRow)
+                textFormat: Text.PlainText
+                color: root.foreground
+                opacity: 0.75
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.Wrap
+              }
+              Rectangle { width: parent.width; height: 1; color: root.foreground; opacity: 0.1 }
+              Repeater {
+                model: root.itemDetails(root.previewRow)
+                delegate: Column {
+                  required property var modelData
+                  width: detailsColumn.width
+                  spacing: Style.space(5)
+                  Text {
+                    width: parent.width
+                    text: modelData.label
+                    color: root.foreground
+                    opacity: 0.45
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    width: parent.width
+                    text: modelData.value
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.9
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WrapAnywhere
+                  }
+                }
+              }
+            }
+          }
+          Rectangle {
+            id: detailsAction
+            anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+            height: Style.space(40)
+            radius: Style.space(8)
+            color: Style.hoverFill
+            visible: root.previewRow !== null
+            Text {
+              anchors.centerIn: parent
+              text: "↵  " + root.primaryLabel(root.previewRow)
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+            MouseArea { anchors.fill: parent; onClicked: root.launchSelected() }
+          }
         }
 
         // ---------------------------------------------------------- footer
@@ -1034,7 +1479,7 @@ Item {
 
           Text {
             anchors { left: parent.left; verticalCenter: parent.verticalCenter }
-            text: "Tab categorias · ↵ abrir · Ctrl+F favoritos · Esc voltar/fechar"
+            text: root.previewRow && root.previewRow.kind === "ssh" ? "Ctrl+H ajuda · Ctrl+F favorito · Ctrl+O ocultar/restaurar · ↵ conectar" : "Ctrl+H ajuda · f arquivos · w: janelas · cb: copiados · ssh: servidores"
             color: root.foreground
             opacity: 0.35
             font.family: root.fontFamily
@@ -1180,6 +1625,234 @@ Item {
           }
         }
 
+        Component {
+          id: searchResultComponent
+          Rectangle {
+            id: resultTile
+            required property var modelData
+            required property int index
+            width: allGrid.width
+            height: Style.space(56)
+            radius: Style.space(8)
+            color: root.selectedSection === "all" && root.selectedIndex === index ? Style.hoverFill : "transparent"
+            Image {
+              id: resultIcon
+              anchors { left: parent.left; leftMargin: Style.space(12); verticalCenter: parent.verticalCenter }
+              width: Style.space(28); height: width
+              source: resultTile.modelData.iconUrl || Quickshell.iconPath(resultTile.modelData.icon || "application-x-executable", true)
+              sourceSize.width: width * 2; sourceSize.height: height * 2
+              fillMode: Image.PreserveAspectFit
+              asynchronous: true
+            }
+            Text {
+              id: resultMark
+              visible: resultIcon.status !== Image.Ready
+              anchors { left: parent.left; leftMargin: Style.space(12); verticalCenter: parent.verticalCenter }
+              text: ({file:"▤", window:"▣", clipboard:"▥", ssh:">_", answer:"=", web:"↗", app:"▦", agent:">_", setting:"⚙"})[resultTile.modelData.kind] || "•"
+              color: root.accent
+              font.pixelSize: Style.space(24)
+            }
+            Text {
+              id: favoriteStar
+              anchors { right: parent.right; rightMargin: Style.space(14); verticalCenter: parent.verticalCenter }
+              visible: root.favorites[resultTile.modelData.id] === true
+              text: "★"
+              color: root.accent
+              font.pixelSize: Style.space(19)
+            }
+            Column {
+              anchors { left: parent.left; right: parent.right; verticalCenter: parent.verticalCenter; leftMargin: Style.space(54); rightMargin: favoriteStar.visible ? Style.space(42) : Style.space(12) }
+              spacing: Style.space(3)
+              Text {
+                width: parent.width
+                text: resultTile.modelData.name
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                elide: Text.ElideRight
+              }
+              Text {
+                width: parent.width
+                text: resultTile.modelData.subtext || resultTile.modelData.category || "Aplicativo"
+                color: root.foreground
+                opacity: 0.6
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideMiddle
+              }
+            }
+            HoverHandler {
+              onHoveredChanged: {
+                if (hovered && !contextMenu.visible && !root.adjustingRows) {
+                  root.interacted = true
+                  root.select("all", resultTile.index)
+                }
+              }
+            }
+            MouseArea {
+              anchors.fill: parent
+              acceptedButtons: Qt.LeftButton | Qt.RightButton
+              onClicked: function(mouse) {
+                root.interacted = true
+                root.select("all",resultTile.index)
+                if (mouse.button === Qt.RightButton) contextMenu.showForSelection()
+                else if (mouse.modifiers & Qt.ShiftModifier) {
+                  if (!root.launchExtra(resultTile.modelData,true)) root.launch(resultTile.modelData)
+                } else root.launch(resultTile.modelData)
+              }
+            }
+          }
+        }
+
+        Rectangle {
+          id: helpPanel
+          anchors.fill: parent
+          visible: root.helpOpened
+          z: 35
+          radius: Style.space(12)
+          color: root.background
+
+          Text {
+            id: helpTitle
+            anchors { left: parent.left; top: parent.top; margins: Style.spacing.lg }
+            text: "Guia do Launcher Plus"
+            font.family: root.fontFamily
+            font.pixelSize: Style.space(24)
+            font.bold: true
+            color: root.accent
+          }
+          Text {
+            anchors { right: parent.right; top: parent.top; margins: Style.spacing.lg }
+            text: "Esc · Fechar"
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            color: root.foreground
+            MouseArea { anchors.fill: parent; onClicked: root.toggleHelp() }
+          }
+          Row {
+            id: helpTabs
+            anchors { left: helpTitle.left; top: helpTitle.bottom; topMargin: Style.spacing.lg }
+            spacing: Style.spacing.sm
+            Repeater {
+              model: ["1 · Atalhos", "2 · Buscas", "3 · SSH e remoção"]
+              delegate: Rectangle {
+                required property int index
+                required property string modelData
+                width: helpTabText.implicitWidth + Style.space(22)
+                height: Style.space(34)
+                radius: Style.space(8)
+                color: root.helpPage === index ? root.accent : Style.hoverFill
+                Text {
+                  id: helpTabText
+                  anchors.centerIn: parent
+                  text: modelData
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  color: root.helpPage === index ? root.background : root.foreground
+                }
+                MouseArea { anchors.fill: parent; onClicked: { root.helpPage = parent.index; helpScroll.contentY = 0; keyCatcher.forceActiveFocus() } }
+              }
+            }
+          }
+          Flickable {
+            id: helpScroll
+            anchors { top: helpTabs.bottom; bottom: helpNavigation.top; left: parent.left; right: parent.right; margins: Style.spacing.lg }
+            contentHeight: helpRows.height
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            Column {
+              id: helpRows
+              width: helpScroll.width
+              spacing: Style.spacing.md
+              Text {
+                width: parent.width
+                text: root.helpPages[root.helpPage].title
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.heading
+              }
+              Repeater {
+                model: root.helpPages[root.helpPage].rows
+                delegate: Item {
+                  required property var modelData
+                  width: helpRows.width
+                  height: Math.max(helpKey.implicitHeight, helpDescription.implicitHeight) + Style.space(16)
+                  Text {
+                    id: helpKey
+                    width: Math.min(Style.space(185), parent.width * 0.3)
+                    text: modelData.key
+                    textFormat: Text.PlainText
+                    color: root.accent
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.Wrap
+                  }
+                  Text {
+                    id: helpDescription
+                    anchors { left: helpKey.right; right: parent.right; leftMargin: Style.spacing.lg }
+                    text: modelData.description
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    opacity: 0.85
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.Wrap
+                  }
+                  Rectangle { anchors { bottom: parent.bottom; left: parent.left; right: parent.right } height: 1; color: root.foreground; opacity: 0.07 }
+                }
+              }
+            }
+          }
+          Item {
+            id: helpNavigation
+            anchors { bottom: parent.bottom; left: parent.left; right: parent.right; margins: Style.spacing.lg }
+            height: Style.space(36)
+            Text {
+              anchors { left: parent.left; verticalCenter: parent.verticalCenter }
+              text: "Página " + (root.helpPage + 1) + " de 3 · ← → ou Tab para navegar · ↑ ↓ para rolar"
+              color: root.foreground
+              opacity: 0.6
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+            Row {
+              anchors { right: parent.right; verticalCenter: parent.verticalCenter }
+              spacing: Style.spacing.lg
+              Repeater {
+                model: ["← Anterior", "Próximo →"]
+                delegate: Text {
+                  required property int index
+                  required property string modelData
+                  text: modelData
+                  color: root.accent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  MouseArea { anchors.fill: parent; onClicked: root.changeHelpPage(parent.index === 0 ? -1 : 1) }
+                }
+              }
+            }
+          }
+        }
+
+        ConfirmDialog {
+          id: removalDialog
+          anchors.fill: parent
+          opened: root.removalStage !== ""
+          z: 30
+          message: root.removalMessage
+          cancelText: "Cancelar"
+          confirmText: root.removalStage === "loading" ? "Aguarde" : root.removalStage === "error" ? "Fechar" : root.removalStage === "risk" ? "Prosseguir" : root.removalPlan.risky ? "Continuar" : "Remover"
+          background: root.background
+          foreground: root.foreground
+          scrim: root.scrim
+          selectedBackground: Style.hoverFill
+          selectedText: root.accent
+          fontFamily: root.fontFamily
+          cornerRadius: Style.space(12)
+          onCanceled: root.cancelRemoval()
+          onConfirmed: root.confirmRemoval()
+        }
+
         // ---------------------------------------------------- context menu
 
         MouseArea {
@@ -1229,13 +1902,21 @@ Item {
           function buildFor(target) {
             contextMenu.row = target
             var entries = [{ label: "Abrir " + target.name, kind: "launch", action: null }]
-            if (target.kind === "setting") { contextMenu.items = entries; return }
+            if (target.kind === "ssh") {
+              entries.push({ label: root.favorites[target.id] ? "Remover dos favoritos (Ctrl+F)" : "Adicionar aos favoritos (Ctrl+F)", kind: "favorite", action: null })
+              entries.push({ label: root.hiddenSsh[target.id] ? "Mostrar novamente na busca (Ctrl+O)" : "Ocultar da busca SSH (Ctrl+O)", kind: "ssh-hidden", action: null })
+              entries.push({ label: "Ver hosts ocultos", kind: "ssh-show-hidden", action: null })
+              contextMenu.items = entries
+              return
+            }
+            if (["app", "agent"].indexOf(target.kind) < 0) { contextMenu.items = entries; return }
 
             entries.push({ label: root.favorites[target.id] ? "Remover dos favoritos (Ctrl+F)" : "Adicionar aos favoritos (Ctrl+F)", kind: "favorite", action: null })
 
             // An agent has no desktop entry: no .desktop actions to offer, and
             // nothing for omarchy-remove-launcher-entry to remove.
             if (target.kind === "agent") {
+              entries.push({label:"Desinstalar agente… (Ctrl+Delete)", kind:"remove", action:null})
               if (root.defaultAgent !== target.agentId)
                 entries.push({ label: "Definir como agente padrão", kind: "default-agent", action: null })
               contextMenu.items = entries
@@ -1245,7 +1926,7 @@ Item {
             var actions = root.actionsFor(target)
             for (var i = 0; i < actions.length; i++)
               entries.push({ label: String(actions[i].name || "Ação"), kind: "action", action: actions[i] })
-            entries.push({ label: "Remover do launcher…", kind: "remove", action: null })
+            entries.push({ label: "Remover aplicativo… (Ctrl+Delete)", kind: "remove", action: null })
             contextMenu.items = entries
           }
 
@@ -1257,6 +1938,8 @@ Item {
             else if (item.kind === "action") root.launchAction(target, item.action)
             else if (item.kind === "default-agent") root.setDefaultAgent(target)
             else if (item.kind === "favorite") root.toggleFavorite(target)
+            else if (item.kind === "ssh-hidden") root.setSshHidden(target, !root.hiddenSsh[target.id])
+            else if (item.kind === "ssh-show-hidden") root.setFilter("ssh:ocultos")
             else if (item.kind === "remove") root.removeEntry(target)
           }
 
@@ -1314,6 +1997,6 @@ Item {
   onFavoriteRowsChanged: if (!root.interacted) root.resetSelection()
 
   // Keep the keyboard selection inside the visible rows of the all-apps grid.
-  onSelectedIndexChanged: (root.selectedSection === "all" ? allGrid : favoritesGrid).positionViewAtIndex(root.selectedIndex, GridView.Contain)
-  onSelectedSectionChanged: (root.selectedSection === "all" ? allGrid : favoritesGrid).positionViewAtIndex(root.selectedIndex, GridView.Contain)
+  onSelectedIndexChanged: if (!root.adjustingRows) (root.selectedSection === "all" ? allGrid : favoritesGrid).positionViewAtIndex(root.selectedIndex, GridView.Contain)
+  onSelectedSectionChanged: if (!root.adjustingRows) (root.selectedSection === "all" ? allGrid : favoritesGrid).positionViewAtIndex(root.selectedIndex, GridView.Contain)
 }

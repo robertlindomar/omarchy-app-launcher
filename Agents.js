@@ -38,7 +38,7 @@ function probeCommand(roster) {
   for (var i = 0; i < roster.length; i++) {
     var definition = roster[i]
     var binary = definition.argv && definition.argv.length > 0 ? definition.argv[0] : definition.id
-    lines.push('command -v ' + shellQuote(binary) + ' >/dev/null 2>&1 && echo ' + shellQuote(definition.id))
+    lines.push('launcher_agent_path=$(command -v ' + shellQuote(binary) + ' 2>/dev/null); if [[ -n "$launcher_agent_path" ]]; then if [[ "$launcher_agent_path" == */mise/shims/* ]]; then mise which ' + shellQuote(binary) + ' >/dev/null 2>&1 && echo ' + shellQuote(definition.id) + '; else echo ' + shellQuote(definition.id) + '; fi; fi')
   }
   return lines.join('; ')
 }

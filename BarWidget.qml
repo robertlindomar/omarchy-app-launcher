@@ -6,7 +6,7 @@ import qs.Ui
 // one toggle path (and the bar can reload without stranding an open overlay).
 BarWidget {
   id: root
-  moduleName: "tyrsolution.app-launcher"
+  moduleName: "robertlindomar.launcher-plus"
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -20,7 +20,7 @@ BarWidget {
     horizontalMargin: 7.5
     onPressed: function(mouseButton) {
       if (!root.bar) return
-      root.bar.run("omarchy-shell shell toggle tyrsolution.app-launcher '{}'")
+      root.bar.run("omarchy-shell shell toggle robertlindomar.launcher-plus '{}'")
     }
   }
 }

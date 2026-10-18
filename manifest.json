@@ -1,26 +1,17 @@
 {
   "schemaVersion": 1,
-  "id": "tyrsolution.app-launcher",
-  "name": "App Launcher",
+  "id": "robertlindomar.launcher-plus",
+  "name": "Launcher Plus",
   "version": "0.1.0",
-  "author": "Tyrsolution",
+  "author": "Robert Lindomar; baseado em Tyrsolution e maajix",
   "license": "MIT",
-  "description": "Centered icon-grid app launcher: clickable app icons, live install/remove tracking, frecency ordering",
+  "description": "Grade de aplicativos com busca local de arquivos, janelas, clipboard, c\u00e1lculos e web; sem IA.",
   "kinds": [
     "overlay",
-    "bar-widget",
     "menu"
   ],
   "entryPoints": {
     "overlay": "AppGrid.qml",
-    "menu": "AppGrid.qml",
-    "barWidget": "BarWidget.qml"
-  },
-  "barWidget": {
-    "displayName": "App Launcher",
-    "description": "Opens the app launcher",
-    "category": "Launcher",
-    "allowMultiple": false,
-    "defaultSection": "left"
+    "menu": "AppGrid.qml"
   }
 }
