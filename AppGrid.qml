@@ -7,7 +7,7 @@ import qs.Ui
 import "Usage.js" as Usage
 import "Agents.js" as Agents
 
-// A centered launcher: a "Frequently used" row on top, then every installed
+// A centered launcher: a manual "Favorites" section on top, then every installed
 // application and coding agent below, alphabetical and scrollable.
 //
 // The app list itself is not ours: the shell's AppLibrary already watches
@@ -22,12 +22,85 @@ Item {
   property var shell: null
   property var manifest: null
 
-  readonly property var appLibrary: root.shell ? root.shell.appLibrary : null
+  readonly property var appLibrary: root.shell && root.shell.appLibrary ? root.shell.appLibrary : localAppLibrary
+
+  // Some Omarchy builds expose a scoped shell without appLibrary to third-party
+  // menus. DesktopEntries is available to QML directly, so keep the launcher
+  // usable when that optional capability is absent.
+  QtObject {
+    id: localAppLibrary
+    signal appsChanged()
+
+    function sortedEntries(query) {
+      var q = String(query || "").toLowerCase().trim()
+      var entries = DesktopEntries.applications.values || []
+      var rows = []
+      for (var i = 0; i < entries.length; i++) {
+        var entry = entries[i]
+        if (!entry || entry.noDisplay) continue
+        var name = String(entry.name || entry.id || "")
+        if (!name || (q && (name + " " + entry.id + " " + (entry.genericName || "") + " " + (entry.comment || "")).toLowerCase().indexOf(q) < 0)) continue
+        rows.push({ entry: entry, score: 0, key: name.toLowerCase(), name: name.toLowerCase() })
+      }
+      rows.sort(function(a, b) { return a.key.localeCompare(b.key) })
+      return rows
+    }
+    function entryName(entry) { return String(entry.name || entry.id || "") }
+    function entrySubtext(entry) { return String(entry.genericName || "") }
+    function iconSource(icon) { return Quickshell.iconPath(String(icon || "application-x-executable"), true) }
+    function refreshIcons() {}
+    function launch(id, name) { Quickshell.execDetached(["uwsm-app", "--", "gtk-launch", String(id) + ".desktop"]) }
+    function remove(id, name) { Quickshell.execDetached(["omarchy-remove-launcher-entry", String(id), String(name)]) }
+  }
+
+  Connections {
+    target: DesktopEntries.applications
+    function onValuesChanged() { localAppLibrary.appsChanged() }
+  }
   readonly property string pluginId: (root.manifest && root.manifest.id) || "tyrsolution.app-launcher"
   readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/omarchy/app-launcher"
 
   property bool opened: false
   property string filterText: ""
+  property string category: "Todos"
+  readonly property var categories: ["Todos", "Agentes", "Desenvolvimento", "Internet", "Escritório", "Mídia", "Jogos", "Sistema", "Utilitários", "Outros", "Configurações"]
+  readonly property var settings: [
+    {id:"setting:wifi", name:"Wi-Fi", keywords:"wifi rede internet conexao", panel:"network"},
+    {id:"setting:bluetooth", name:"Bluetooth", keywords:"fone dispositivos", panel:"bluetooth"},
+    {id:"setting:sound", name:"Som", keywords:"audio volume microfone", panel:"audio"},
+    {id:"setting:display", name:"Monitor", keywords:"tela brilho display", panel:"monitor"},
+    {id:"setting:power", name:"Energia", keywords:"bateria desligar reiniciar", panel:"power"}
+  ]
+  function normalized(value) { return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase() }
+  function matchScore(name, extra, query) {
+    var n = normalized(name), q = normalized(query).trim()
+    if (!q) return 0
+    if (n === q) return 0
+    if (n.indexOf(q) === 0) return 1
+    if (n.split(/[\s_.-]+/).some(function(w) { return w.indexOf(q) === 0 })) return 2
+    if (n.indexOf(q) >= 0) return 3
+    if (normalized(extra).indexOf(q) >= 0) return 4
+    return -1
+  }
+  function categoryOf(entry) {
+    var cats = entry.categories || []
+    var rules = [["Desenvolvimento", "Development", "IDE"], ["Escritório", "Office"], ["Mídia", "AudioVideo", "Audio", "Video", "Graphics"], ["Internet", "Network", "WebBrowser", "Email", "Chat"], ["Jogos", "Game"], ["Sistema", "System", "Settings"], ["Utilitários", "Utility"]]
+    for (var i=0; i<rules.length; i++)
+      for (var j=1; j<rules[i].length; j++) if (cats.indexOf(rules[i][j]) >= 0) return rules[i][0]
+    return "Outros"
+  }
+  function setCategory(value) {
+    root.category = value
+    contextMenu.hide()
+    root.rebuild()
+    root.resetSelection()
+    allGrid.positionViewAtBeginning()
+    keyCatcher.forceActiveFocus()
+  }
+  function cycleCategory(direction) {
+    var i = root.categories.indexOf(root.category)
+    root.setCategory(root.categories[(i + direction + root.categories.length) % root.categories.length])
+  }
   property var allRows: []
   // Coding agents (claude, codex, gemini, …) launched into a terminal. Probed
   // on open so an agent installed since last time shows up.
@@ -43,10 +116,10 @@ Item {
   // Every app with a recorded launch, widest-first. The visible row is a slice
   // of this: a binding, because rebuild() can run before the window is sized
   // and `panel.columns` is only known once it is.
-  property var frequentPool: []
-  readonly property var frequentRows: root.searching
+  property var favoritePool: []
+  readonly property var favoriteRows: root.searching
     ? []
-    : root.frequentPool.slice(0, Math.max(1, panel.columns))
+    : root.favoritePool
 
   // Selection spans two grids, so it needs a section as well as an index.
   property string selectedSection: "all"
@@ -58,6 +131,7 @@ Item {
 
   // Persisted state. `usage` drives the frequent row, `seenIds` drives badges.
   property var usage: ({})
+  property var favorites: ({})
   property var seenIds: ({})
   property bool seenLoaded: false
   property var newIds: ({})
@@ -69,7 +143,7 @@ Item {
   // Searching collapses the two sections into one result grid: ranking by
   // relevance and ranking by frecency at the same time reads as noise.
   readonly property bool searching: root.filterText.length > 0
-  readonly property bool showFrequent: !root.searching && root.frequentRows.length > 0
+  readonly property bool showFavorites: !root.searching && root.favoriteRows.length > 0
 
   // Follows the active Omarchy theme through the shared menu color tokens.
   property color background: Color.menu.background
@@ -97,6 +171,7 @@ Item {
     if (payload.fontFamily) root.fontFamily = payload.fontFamily
     if (Number(payload.iconScale) > 0) root.iconScale = Number(payload.iconScale)
 
+    root.category = "Todos"
     root.filterText = String(payload.query || "")
     contextMenu.hide()
     root.opened = true
@@ -149,11 +224,11 @@ Item {
   }
 
   function rebuild() {
-    if (!root.appLibrary) { root.allRows = []; root.frequentPool = []; return }
+    if (!root.appLibrary) { root.allRows = []; root.favoritePool = []; return }
     // sortedEntries returns search rows ({ entry, score, key, name }), not the
     // DesktopEntry itself — the entry is one level down. With no query it is
     // already alphabetical; with one it is ranked by the shell's fuzzy matcher.
-    var matches = root.appLibrary.sortedEntries(root.filterText)
+    var matches = root.appLibrary.sortedEntries("")
     var now = Date.now()
     var out = []
     for (var i = 0; i < matches.length; i++) {
@@ -162,6 +237,8 @@ Item {
       if (!id) continue
       out.push({
         id: id,
+        category: root.categoryOf(entry),
+        searchExtra: [entry.genericName || "", entry.comment || "", (entry.keywords || []).join(" "), id].join(" "),
         kind: "app",
         name: root.appLibrary.entryName(entry),
         subtext: root.appLibrary.entrySubtext(entry),
@@ -173,26 +250,25 @@ Item {
       })
     }
 
-    var agents = root.agentRows()
-    // Unfiltered, agents interleave alphabetically with apps (sortedEntries
-    // orders apps by lowercased name, so re-sorting the merge reproduces it).
-    // Filtered, matching agents lead: they are few, and typing "cla" should put
-    // Claude Code in front rather than three rows down.
-    if (root.searching) {
-      out = Agents.sortMatches(agents, root.filterText).concat(out)
-    } else {
-      out = agents.concat(out)
-      out.sort(function(a, b) {
-        var an = String(a.name || "").toLowerCase()
-        var bn = String(b.name || "").toLowerCase()
-        if (an < bn) return -1
-        if (an > bn) return 1
-        return 0
-      })
+    out = root.agentRows().map(function(row) { row.category = "Agentes"; return row }).concat(out)
+    if (root.searching || root.category === "Configurações") {
+      out = out.concat(root.settings.map(function(item) {
+        return { id:item.id, kind:"setting", name:item.name, category:"Configurações", searchExtra:item.keywords,
+          command:["omarchy-shell", "shell", "toggle", "robertlindomar.omarchy-ptbr." + item.panel],
+          icon:"preferences-system", iconUrl:"", monogram:"", subtext:"Configuração do sistema", isNew:false }
+      }))
     }
+    out = out.filter(function(row) {
+      if (root.category !== "Todos" && row.category !== root.category) return false
+      row.searchRank = root.matchScore(row.name, row.searchExtra || row.subtext || "", root.filterText)
+      return row.searchRank >= 0
+    })
+    out.sort(function(a,b) {
+      return a.searchRank - b.searchRank || String(a.name).localeCompare(String(b.name), "pt-BR")
+    })
 
     root.allRows = out
-    root.frequentPool = root.pickFrequent(out)
+    root.favoritePool = root.pickFavorites(out)
     root.clampSelection()
   }
 
@@ -253,7 +329,7 @@ Item {
         agentId: definition.id,
         kind: "agent",
         name: definition.name,
-        subtext: "Coding agent",
+        subtext: "Agente de código",
         icon: root.agentThemedIcon(definition),
         iconUrl: root.agentIconUrl(definition),
         monogram: root.agentMonogram(definition),
@@ -271,11 +347,10 @@ Item {
 
   // Apps with no recorded launch never appear here, so a fresh install shows no
   // section at all rather than an arbitrary one.
-  function pickFrequent(rows) {
+  function pickFavorites(rows) {
     var scored = []
     for (var i = 0; i < rows.length; i++)
-      if (rows[i].score > 0) scored.push(rows[i])
-    Usage.sortByScore(scored)
+      if (root.favorites[rows[i].id] === true) scored.push(rows[i])
     return scored
   }
 
@@ -287,7 +362,7 @@ Item {
   }
 
   function rowsFor(section) {
-    return section === "frequent" ? root.frequentRows : root.allRows
+    return section === "favorites" ? root.favoriteRows : root.allRows
   }
 
   function rowAt(section, index) {
@@ -306,7 +381,7 @@ Item {
   }
 
   function resetSelection() {
-    root.select(root.showFrequent ? "frequent" : "all", 0)
+    root.select(root.showFavorites ? "favorites" : "all", 0)
   }
 
   function clampSelection() {
@@ -331,7 +406,7 @@ Item {
 
     var column = root.selectedIndex % columns
     if (dy > 0) {
-      if (root.selectedSection === "frequent") {
+      if (root.selectedSection === "favorites" && root.selectedIndex + columns >= rows.length) {
         if (root.allRows.length === 0) return
         root.select("all", Math.min(column, root.allRows.length - 1))
         return
@@ -341,8 +416,8 @@ Item {
     }
 
     if (root.selectedSection === "all" && root.selectedIndex < columns) {
-      if (!root.showFrequent) return
-      root.select("frequent", Math.min(column, root.frequentRows.length - 1))
+      if (!root.showFavorites) return
+      root.select("favorites", Math.min((Math.ceil(root.favoriteRows.length / columns) - 1) * columns + column, root.favoriteRows.length - 1))
       return
     }
     root.selectedIndex = Math.max(0, root.selectedIndex - columns)
@@ -350,13 +425,34 @@ Item {
 
   // ------------------------------------------------------------ launching
 
+  // Do NOT call shell.appLibrary.launch / localAppLibrary.launch — both hit
+  // "Property 'launch' of object QObject_QML_* is not a function" (invalid
+  // QQmlVMEMetaObject context) from this third-party overlay. Exec the same
+  // uwsm-app + gtk-launch line AppLibrary uses, via Util (module singleton).
+  function launchDesktop(id) {
+    var desktopId = String(id || "")
+    if (!desktopId) return
+    Util.execDetached("uwsm-app -- gtk-launch " + Util.shellQuote(desktopId + ".desktop"))
+  }
+
+  function removeDesktop(id, name) {
+    var desktopId = String(id || "")
+    if (!desktopId) return
+    Util.execDetached("omarchy-remove-launcher-entry " + Util.shellQuote(desktopId) + " " + Util.shellQuote(String(name || desktopId)))
+  }
+
   function launch(row) {
     if (!row) return
+    if (row.kind === "setting") { Quickshell.execDetached(row.command); root.dismiss(); return }
     if (row.kind === "agent") { root.launchAgent(row); return }
-    root.usage = Usage.record(root.usage, row.id, Date.now())
+    var id = String(row.id || "")
+    var name = String(row.name || "")
+    root.usage = Usage.record(root.usage, id, Date.now())
     root.persistUsage()
+    // Start the app before dismiss so we never rely on component methods
+    // after the overlay begins tearing down.
+    root.launchDesktop(id)
     root.dismiss()
-    if (root.appLibrary) root.appLibrary.launch(row.id, row.name)
   }
 
   // Agents are CLIs, so they go into a terminal through omarchy-launch-tui with
@@ -367,11 +463,11 @@ Item {
     if (!row) return
     root.usage = Usage.record(root.usage, row.id, Date.now())
     root.persistUsage()
-    root.dismiss()
 
     var quoted = []
     for (var i = 0; i < row.argv.length; i++) quoted.push(Util.shellQuote(String(row.argv[i])))
     Util.execDetached('[[ -d "$HOME/Work" ]] && cd "$HOME/Work"; exec omarchy-launch-tui --app-id=org.omarchy.agent ' + quoted.join(" "))
+    root.dismiss()
   }
 
   // Sets the default and launches it — that is what the omarchy command does.
@@ -390,9 +486,9 @@ Item {
   // under the same uwsm scope the shell uses for apps.
   function launchAction(row, action) {
     if (!row || !action) return
-    root.usage = Usage.record(root.usage, row.id, Date.now())
+    var id = String(row.id || "")
+    root.usage = Usage.record(root.usage, id, Date.now())
     root.persistUsage()
-    root.dismiss()
 
     var argv = action.command || []
     if (argv.length > 0) {
@@ -400,9 +496,9 @@ Item {
       for (var i = 0; i < argv.length; i++) quoted.push(Util.shellQuote(String(argv[i])))
       Util.execDetached("uwsm-app -- " + quoted.join(" "))
     } else {
-      // No parsed argv (unusual); let Quickshell run it however it can.
       try { action.execute() } catch (e) { console.warn("app-grid: action execute failed:", e) }
     }
+    root.dismiss()
   }
 
   function actionsFor(row) {
@@ -413,8 +509,10 @@ Item {
 
   function removeEntry(row) {
     if (!row) return
+    var id = String(row.id || "")
+    var name = String(row.name || "")
+    root.removeDesktop(id, name)
     root.dismiss()
-    if (root.appLibrary) root.appLibrary.remove(row.id, row.name)
   }
 
   function resetUsage(row) {
@@ -444,6 +542,21 @@ Item {
     if (JSON.stringify(pruned) !== JSON.stringify(root.usage)) {
       root.usage = pruned
       root.persistUsage()
+    }
+  }
+
+  function toggleFavorite(row) {
+    if (!row || row.kind === "setting") return
+    var next = ({})
+    for (var id in root.favorites) next[id] = true
+    if (next[row.id]) delete next[row.id]
+    else next[row.id] = true
+    root.favorites = next
+    favoritesFile.setText(Usage.serializeSeen(next))
+    root.rebuild()
+    // Keep the same app selected when the favorites section changes.
+    for (var i = 0; i < root.allRows.length; i++) {
+      if (root.allRows[i].id === row.id) { root.select("all", i); break }
     }
   }
 
@@ -499,6 +612,17 @@ Item {
     onLoaded: root.defaultAgent = String(text() || "").trim()
     onFileChanged: reload()
     onLoadFailed: root.defaultAgent = ""
+  }
+
+  FileView {
+    id: favoritesFile
+    path: root.stateDir + "/favorites.json"
+    atomicWrites: true
+    watchChanges: true
+    printErrors: false
+    onLoaded: { root.favorites = Usage.parseSeen(text()) || ({}); root.rebuild() }
+    onFileChanged: reload()
+    onLoadFailed: { root.favorites = ({}); root.rebuild() }
   }
 
   FileView {
@@ -599,9 +723,16 @@ Item {
             return
           }
 
-          if (event.key === Qt.Key_Escape) {
+          if (event.key === Qt.Key_F && (event.modifiers & Qt.ControlModifier)) {
+            root.toggleFavorite(root.selectedRow())
+            event.accepted = true
+          } else if (event.key === Qt.Key_Escape) {
             if (root.filterText) root.setFilter("")
+            else if (root.category !== "Todos") root.setCategory("Todos")
             else root.dismiss()
+            event.accepted = true
+          } else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+            root.cycleCategory((event.modifiers & Qt.ShiftModifier) || event.key === Qt.Key_Backtab ? -1 : 1)
             event.accepted = true
           } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
             root.launchSelected()
@@ -649,7 +780,7 @@ Item {
             id: query
             anchors { left: parent.left; verticalCenter: parent.verticalCenter }
             width: parent.width - counter.width - Style.spacing.lg
-            text: root.filterText || "Search apps…"
+            text: root.filterText || "Buscar aplicativos e configurações…"
             color: root.foreground
             opacity: root.filterText ? 1 : 0.5
             font.family: root.fontFamily
@@ -682,8 +813,8 @@ Item {
               for (var i = 0; i < root.allRows.length; i++)
                 if (root.allRows[i].kind === "agent") agents++
               var apps = root.allRows.length - agents
-              var label = apps + (apps === 1 ? " app" : " apps")
-              if (agents > 0) label += " · " + agents + (agents === 1 ? " agent" : " agents")
+              var label = apps + (apps === 1 ? " aplicativo" : " aplicativos")
+              if (agents > 0) label += " · " + agents + (agents === 1 ? " agente" : " agentes")
               return label
             }
             color: root.foreground
@@ -693,9 +824,41 @@ Item {
           }
         }
 
+        Flickable {
+          id: categoryBar
+          anchors { top: header.bottom; left: parent.left; right: parent.right }
+          height: Style.space(42)
+          contentWidth: categoryRow.width
+          clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          Row {
+            id: categoryRow
+            spacing: Style.space(6)
+            Repeater {
+              model: root.categories
+              delegate: Rectangle {
+                required property string modelData
+                width: categoryText.implicitWidth + Style.space(18)
+                height: Style.space(30)
+                radius: Style.space(8)
+                color: root.category === modelData ? root.accent : "transparent"
+                Text {
+                  id: categoryText
+                  anchors.centerIn: parent
+                  text: modelData
+                  color: root.category === parent.modelData ? root.background : root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                MouseArea { anchors.fill: parent; onClicked: root.setCategory(parent.modelData) }
+              }
+            }
+          }
+        }
+
         Rectangle {
           id: headerRule
-          anchors { top: header.bottom; left: parent.left; right: parent.right }
+          anchors { top: categoryBar.bottom; left: parent.left; right: parent.right }
           height: Math.max(1, Style.space(1))
           color: root.foreground
           opacity: 0.12
@@ -704,12 +867,12 @@ Item {
         // ------------------------------------------------- frequently used
 
         Text {
-          id: frequentLabel
-          visible: root.showFrequent
+          id: favoritesLabel
+          visible: root.showFavorites
           anchors { top: headerRule.bottom; left: parent.left }
           height: visible ? root.sectionLabelHeight : 0
           verticalAlignment: Text.AlignVCenter
-          text: "Frequently used"
+          text: "Favoritos"
           color: root.foreground
           opacity: 0.45
           font.family: root.fontFamily
@@ -717,25 +880,26 @@ Item {
         }
 
         GridView {
-          id: frequentGrid
-          visible: root.showFrequent
-          anchors { top: frequentLabel.bottom; horizontalCenter: parent.horizontalCenter }
+          id: favoritesGrid
+          visible: root.showFavorites
+          anchors { top: favoritesLabel.bottom; horizontalCenter: parent.horizontalCenter }
           width: panel.gridWidth
-          height: visible ? root.cellHeight : 0
+          height: visible ? root.cellHeight * Math.min(2, Math.ceil(root.favoriteRows.length / panel.columns)) : 0
           cellWidth: root.cellWidth
           cellHeight: root.cellHeight
-          interactive: false
+          interactive: true
           clip: true
-          model: root.frequentRows
+          boundsBehavior: Flickable.StopAtBounds
+          model: root.favoriteRows
           delegate: tileComponent
 
-          property string section: "frequent"
+          property string section: "favorites"
         }
 
         Rectangle {
           id: sectionRule
-          visible: root.showFrequent
-          anchors { top: frequentGrid.bottom; left: parent.left; right: parent.right }
+          visible: root.showFavorites
+          anchors { top: favoritesGrid.bottom; left: parent.left; right: parent.right }
           anchors.topMargin: visible ? Style.spacing.sm : 0
           height: visible ? Math.max(1, Style.space(1)) : 0
           color: root.foreground
@@ -746,11 +910,11 @@ Item {
 
         Text {
           id: allLabel
-          visible: root.showFrequent
+          visible: root.showFavorites
           anchors { top: sectionRule.bottom; left: parent.left }
           height: visible ? root.sectionLabelHeight : 0
           verticalAlignment: Text.AlignVCenter
-          text: "All apps"
+          text: "Todos os aplicativos"
           color: root.foreground
           opacity: 0.45
           font.family: root.fontFamily
@@ -854,7 +1018,7 @@ Item {
         Text {
           anchors.centerIn: allArea
           visible: root.allRows.length === 0
-          text: root.filterText ? "No apps match “" + root.filterText + "”" : "No applications found"
+          text: root.filterText ? "Nenhum resultado para “" + root.filterText + "”" : "Nenhum aplicativo nesta categoria"
           color: root.foreground
           opacity: 0.5
           font.family: root.fontFamily
@@ -870,7 +1034,7 @@ Item {
 
           Text {
             anchors { left: parent.left; verticalCenter: parent.verticalCenter }
-            text: "type to search · ↵ launch · right-click for actions · esc close"
+            text: "Tab categorias · ↵ abrir · Ctrl+F favoritos · Esc voltar/fechar"
             color: root.foreground
             opacity: 0.35
             font.family: root.fontFamily
@@ -881,7 +1045,7 @@ Item {
           Text {
             anchors { right: parent.right; verticalCenter: parent.verticalCenter }
             visible: contextMenu.newCount > 0
-            text: contextMenu.newCount + " new"
+            text: contextMenu.newCount + " novos"
             color: root.accent
             opacity: 0.8
             font.family: root.fontFamily
@@ -1064,23 +1228,24 @@ Item {
 
           function buildFor(target) {
             contextMenu.row = target
-            var entries = [{ label: "Open " + target.name, kind: "launch", action: null }]
+            var entries = [{ label: "Abrir " + target.name, kind: "launch", action: null }]
+            if (target.kind === "setting") { contextMenu.items = entries; return }
+
+            entries.push({ label: root.favorites[target.id] ? "Remover dos favoritos (Ctrl+F)" : "Adicionar aos favoritos (Ctrl+F)", kind: "favorite", action: null })
 
             // An agent has no desktop entry: no .desktop actions to offer, and
             // nothing for omarchy-remove-launcher-entry to remove.
             if (target.kind === "agent") {
               if (root.defaultAgent !== target.agentId)
-                entries.push({ label: "Set as default agent", kind: "default-agent", action: null })
-              if (root.usage[target.id]) entries.push({ label: "Reset usage ranking", kind: "reset", action: null })
+                entries.push({ label: "Definir como agente padrão", kind: "default-agent", action: null })
               contextMenu.items = entries
               return
             }
 
             var actions = root.actionsFor(target)
             for (var i = 0; i < actions.length; i++)
-              entries.push({ label: String(actions[i].name || "Action"), kind: "action", action: actions[i] })
-            if (root.usage[target.id]) entries.push({ label: "Reset usage ranking", kind: "reset", action: null })
-            entries.push({ label: "Remove from launcher…", kind: "remove", action: null })
+              entries.push({ label: String(actions[i].name || "Ação"), kind: "action", action: actions[i] })
+            entries.push({ label: "Remover do launcher…", kind: "remove", action: null })
             contextMenu.items = entries
           }
 
@@ -1091,7 +1256,7 @@ Item {
             if (item.kind === "launch") root.launch(target)
             else if (item.kind === "action") root.launchAction(target, item.action)
             else if (item.kind === "default-agent") root.setDefaultAgent(target)
-            else if (item.kind === "reset") root.resetUsage(target)
+            else if (item.kind === "favorite") root.toggleFavorite(target)
             else if (item.kind === "remove") root.removeEntry(target)
           }
 
@@ -1146,9 +1311,9 @@ Item {
     }
   }
 
-  onFrequentRowsChanged: if (!root.interacted) root.resetSelection()
+  onFavoriteRowsChanged: if (!root.interacted) root.resetSelection()
 
   // Keep the keyboard selection inside the visible rows of the all-apps grid.
-  onSelectedIndexChanged: if (root.selectedSection === "all") allGrid.positionViewAtIndex(root.selectedIndex, GridView.Contain)
-  onSelectedSectionChanged: if (root.selectedSection === "all") allGrid.positionViewAtIndex(root.selectedIndex, GridView.Contain)
+  onSelectedIndexChanged: (root.selectedSection === "all" ? allGrid : favoritesGrid).positionViewAtIndex(root.selectedIndex, GridView.Contain)
+  onSelectedSectionChanged: (root.selectedSection === "all" ? allGrid : favoritesGrid).positionViewAtIndex(root.selectedIndex, GridView.Contain)
 }

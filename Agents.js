@@ -153,7 +153,17 @@ function mergeRoster(customs) {
     byId[definition.id] = definition
   }
   for (var i = 0; i < ROSTER.length; i++) put(ROSTER[i])
-  for (var j = 0; j < (customs || []).length; j++) put(customs[j])
+  for (var j = 0; j < (customs || []).length; j++) {
+    var custom = customs[j]
+    var builtin = byId[custom.id]
+    // Custom overrides argv/name but should keep a shipped mark unless the user
+    // supplied their own icon path or theme name.
+    if (builtin && custom.custom && !custom.icon && builtin.asset) {
+      custom.asset = builtin.asset
+      custom.monogram = ""
+    }
+    put(custom)
+  }
 
   var out = []
   for (var k = 0; k < order.length; k++) out.push(byId[order[k]])

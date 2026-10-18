@@ -8,10 +8,12 @@
   "description": "Centered icon-grid app launcher: clickable app icons, live install/remove tracking, frecency ordering",
   "kinds": [
     "overlay",
-    "bar-widget"
+    "bar-widget",
+    "menu"
   ],
   "entryPoints": {
     "overlay": "AppGrid.qml",
+    "menu": "AppGrid.qml",
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
